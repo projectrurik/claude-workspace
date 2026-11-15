@@ -49,5 +49,5 @@ Send one email with Gmail send_message to paige.liebich@gmail.com, using htmlBod
   - an italic line: outlet · source type (peer-reviewed journal, preprint, mainstream, independent, nonprofit investigative, etc.) · publish date
   - 2–3 sentences on what it says
   - "Why read:" plus one sentence
-- Footer: any empty slots and why, plus one line saying dates were checked against the URL or the source's own listing.
+- Footer: any empty slots and why, one line saying dates were checked against the URL or the source's own listing, and the line: "Want more on something? Reply to this email, e.g. 'tell me more about #3', and you'll get a deeper dive (facts plus the wider conversation) in this thread within a couple of hours."
 Send exactly one email, then stop. Do not create files, commits or PRs.
