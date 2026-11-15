@@ -24,7 +24,8 @@ Slots and source lists are in `lib/slots.ts`. The research rules are the prompts
    | `ANTHROPIC_API_KEY` | your key from step 1 |
    | `APP_PASSCODE` | any passcode you'll remember |
    | `CRON_SECRET` | a long random string (Vercel sends it with the scheduled jobs) |
-   | `CLAUDE_MODEL` | optional; defaults to `claude-opus-5-5` |
+   | `BRIEF_MODEL` | optional; model for the morning research (default `claude-haiku-5-5`) |
+   | `DEEPDIVE_MODEL` | optional; model for "tell me more" (default `claude-haiku-5-5`) |
    | `CLAUDE_EFFORT` | optional: `low`, `medium`, `high` (default) or `xhigh` |
 
 5. **Redeploy** so the variables take effect (Deployments → ⋯ → Redeploy).
@@ -35,12 +36,19 @@ Slots and source lists are in `lib/slots.ts`. The research rules are the prompts
 
 ## Cost
 
-You pay Anthropic directly for API usage, and Vercel's free Hobby plan covers the hosting. This is a rough estimate; check the usage page in the Console after a few days for real numbers:
+You pay Anthropic directly for API usage, and Vercel's free Hobby plan covers the hosting. These are rough estimates; check the usage page in the Console after a week for real numbers.
 
-- **Daily brief:** about $2.50–4.50 a day on Claude Opus 5.5, which covers 10 researched items including web searches at $10 per 1,000.
-- **Each new "tell me more":** about $0.30–0.60. Reopening a saved answer is free.
+| Model | Daily brief (10 items) | Each new "tell me more" |
+|---|---|---|
+| Claude Haiku 5.5 (default) | ~$0.50–1.20/day (~$15–35/month) | ~$0.03–0.08 |
+| Claude Sonnet 5.5 | ~$2–3.50/day | ~$0.15–0.30 |
+| Claude Opus 5.5 | ~$2.50–4.50/day | ~$0.30–0.60 |
 
-To cut costs, set `CLAUDE_MODEL=claude-sonnet-5-5`, which has roughly half the per-token price, and/or `CLAUDE_EFFORT=medium`.
+On Haiku, roughly half the cost is web search fees ($10 per 1,000 searches, the same on every model). The code caps each slot at 5 searches and 3 page fetches. Reopening a saved deep dive is free.
+
+A middle option is to keep `BRIEF_MODEL` on Haiku and set `DEEPDIVE_MODEL=claude-sonnet-5-5`. You'd only pay the higher price on items you actually tap.
+
+On any model, the code itself rejects items whose published date falls outside the last 48 hours, and links to aggregators.
 
 ## Local development
 

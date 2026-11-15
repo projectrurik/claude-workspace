@@ -2,24 +2,44 @@ import Anthropic from "@anthropic-ai/sdk";
 import { BLOCKED_DOMAINS, type Slot } from "./slots";
 import type { BriefItem, DeepDiveTurn } from "./types";
 
-export const MODEL = process.env.CLAUDE_MODEL || "claude-opus-5-5";
+// Separate models for the daily research and the on-demand deep dives, so
+// you can pay for a bigger model only where you want it.
+export const BRIEF_MODEL = process.env.BRIEF_MODEL || "claude-haiku-5-5";
+export const DEEPDIVE_MODEL = process.env.DEEPDIVE_MODEL || "claude-haiku-5-5";
 const EFFORT = (process.env.CLAUDE_EFFORT || "high") as "low" | "medium" | "high" | "xhigh" | "max";
 
 // maxRetries is raised because ten slots run at once and a new API account
 // has low rate limits; the SDK waits for `retry-after` between attempts.
 export const client = new Anthropic({ maxRetries: 6 });
 
-// Server-side fallback: if the model declines a request, the API re-runs it
-// on a fallback model inside the same call instead of returning nothing.
-const FALLBACK = {
-  betas: ["server-side-fallback-2026-07-01"],
-  fallbacks: "default" as const,
-};
+const isHaiku = (model: string) => model.startsWith("claude-haiku");
 
-const webTools: Anthropic.Beta.BetaToolUnion[] = [
-  { type: "web_search_20260209", name: "web_search", max_uses: 6, blocked_domains: BLOCKED_DOMAINS },
-  { type: "web_fetch_20260209", name: "web_fetch", max_uses: 4, blocked_domains: BLOCKED_DOMAINS },
-];
+// Server-side fallback: if the model declines a request, the API re-runs it
+// on a fallback model inside the same call. Haiku has no server-side
+// fallback (sending the parameter does nothing or errors), so it's omitted there.
+function fallbackFor(model: string) {
+  return isHaiku(model)
+    ? {}
+    : { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" as const };
+}
+
+// The newer web tool versions (with dynamic filtering, which keeps search
+// results out of the context and cuts tokens) need Sonnet/Opus-class models;
+// Haiku uses the basic versions.
+function webTools(model: string, searches: number, fetches: number): Anthropic.Beta.BetaToolUnion[] {
+  if (isHaiku(model)) {
+    return [
+      { type: "web_search_20250305", name: "web_search", max_uses: searches, blocked_domains: BLOCKED_DOMAINS },
+      { type: "web_fetch_20250910", name: "web_fetch", max_uses: fetches, blocked_domains: BLOCKED_DOMAINS },
+    ];
+  }
+  return [
+    { type: "web_search_20260209", name: "web_search", max_uses: searches, blocked_domains: BLOCKED_DOMAINS },
+    { type: "web_fetch_20260209", name: "web_fetch", max_uses: fetches, blocked_domains: BLOCKED_DOMAINS },
+  ];
+}
+
+const SEARCH_GROUNDING = `Your training data ends well before today's date, so don't rely on memory for anything recent: search for it.`;
 
 // ---------------------------------------------------------------------------
 // Daily brief: one slot per call
@@ -87,7 +107,7 @@ function slotPrompt(slot: Slot, otherSlots: Slot[], recent: BriefItem[], now: Da
   const recentList = recent.length
     ? recent.map((i) => `- ${i.outlet}: ${i.url}`).join("\n")
     : "(none yet)";
-  return `Current time (UTC): ${now.toISOString()}
+  return `The current date and time (UTC) is ${now.toISOString()}. ${SEARCH_GROUNDING}
 Only items published on or after ${new Date(now.getTime() - 48 * 3600 * 1000).toISOString()} qualify.
 
 Slot ${slot.n}: ${slot.name}
@@ -146,6 +166,18 @@ function toItem(slot: Slot, input: SubmitInput): BriefItem {
   if (url.protocol !== "https:" && url.protocol !== "http:") {
     return emptyItem(slot, "The chosen item had an invalid link, so it was dropped.");
   }
+  const host = url.hostname.replace(/^www\./, "");
+  if (BLOCKED_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`))) {
+    return emptyItem(slot, "The chosen item was from an aggregator, so it was dropped.");
+  }
+  // Hard freshness check in code, independent of the model: the published
+  // date must fall within the last 48 hours (to the day) and not in the future.
+  const now = Date.now();
+  const earliest = new Date(now - 48 * 3600 * 1000).toISOString().slice(0, 10);
+  const latest = new Date(now + 14 * 3600 * 1000).toISOString().slice(0, 10); // allow for UTC+14 datelines
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.published) || input.published < earliest || input.published > latest) {
+    return emptyItem(slot, "The best candidate didn't meet the 48-hour rule, so it was dropped.");
+  }
   return {
     slot: slot.n,
     slotName: slot.name,
@@ -178,13 +210,13 @@ export async function researchSlot(
   for (let turn = 0; turn < 8; turn++) {
     const stream = client.beta.messages.stream(
       {
-        model: MODEL,
+        model: BRIEF_MODEL,
         max_tokens: 32000,
         output_config: { effort: EFFORT },
         system: [{ type: "text", text: SLOT_SYSTEM, cache_control: { type: "ephemeral" } }],
-        tools: [...webTools, submitItemTool],
+        tools: [...webTools(BRIEF_MODEL, 5, 3), submitItemTool],
         messages,
-        ...FALLBACK,
+        ...fallbackFor(BRIEF_MODEL),
       },
       { signal },
     );
@@ -247,7 +279,9 @@ export async function* streamDeepDive(
   question: string,
   signal?: AbortSignal,
 ): AsyncGenerator<DeepDiveEvent, string> {
-  const context = `The item from today's brief (slot: ${item.slotName}):
+  const context = `The current date is ${new Date().toISOString().slice(0, 10)}. ${SEARCH_GROUNDING}
+
+The item from the reader's brief (slot: ${item.slotName}):
 Title: ${item.title}
 Outlet: ${item.outlet} (${item.sourceType}), published ${item.published}
 URL: ${item.url}
@@ -267,16 +301,13 @@ Summary: ${item.summary}`;
   for (let turn = 0; turn < 6; turn++) {
     const stream = client.beta.messages.stream(
       {
-        model: MODEL,
+        model: DEEPDIVE_MODEL,
         max_tokens: 32000,
         output_config: { effort: EFFORT },
         system: [{ type: "text", text: DEEP_DIVE_SYSTEM, cache_control: { type: "ephemeral" } }],
-        tools: [
-          { type: "web_search_20260209", name: "web_search", max_uses: 8, blocked_domains: BLOCKED_DOMAINS },
-          { type: "web_fetch_20260209", name: "web_fetch", max_uses: 5, blocked_domains: BLOCKED_DOMAINS },
-        ],
+        tools: webTools(DEEPDIVE_MODEL, 6, 4),
         messages,
-        ...FALLBACK,
+        ...fallbackFor(DEEPDIVE_MODEL),
       },
       { signal },
     );
